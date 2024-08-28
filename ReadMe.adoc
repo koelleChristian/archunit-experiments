@@ -18,12 +18,165 @@ image::documentation/Archunit_Layers.drawio.png[]
 
 === Tests
 [source, java]
+////
 ----
 include::src/test/java/de/koelle/christian/archunit/ArchUnitTest.java[]
 ----
+////
+----
+package de.koelle.christian.archunit;
 
+import com.tngtech.archunit.core.domain.JavaClasses;
+import com.tngtech.archunit.core.importer.ClassFileImporter;
+import com.tngtech.archunit.lang.syntax.ArchRuleDefinition;
+import com.tngtech.archunit.library.Architectures;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
+
+import java.util.Collection;
+import java.util.List;
+import java.util.stream.Stream;
+
+public class ArchUnitTest {
+
+    private static final String PACKAGE_ROOT = "de.koelle.christian.archunit";
+    private static final String LAYER1_PATH_ID = PACKAGE_ROOT + ".layer1a..";
+    private static final String LAYER2_PATH_ID = PACKAGE_ROOT + ".layer2a..";
+    private static final String LAYER3_PATH_ID = PACKAGE_ROOT + ".layer3a..";
+    public static final JavaClasses OUR_CLASSES = new ClassFileImporter()
+            .importPackages(PACKAGE_ROOT);
+
+    @Test
+    public void testLayersArchUnitFeature() {
+        Architectures
+                .layeredArchitecture()
+                .consideringOnlyDependenciesInLayers()
+                .layer("layer1").definedBy(LAYER1_PATH_ID)
+                .layer("layer2").definedBy(LAYER2_PATH_ID)
+                .layer("layer3").definedBy(LAYER3_PATH_ID)
+                .whereLayer("layer1").mayNotBeAccessedByAnyLayer()
+                .whereLayer("layer2").mayOnlyBeAccessedByLayers("layer1")
+                .whereLayer("layer3").mayOnlyBeAccessedByLayers("layer2")
+                .check(OUR_CLASSES);
+    }
+
+    public static Stream<Arguments> paramsTestLayersSelfmade() {
+        return Stream.of(
+                Arguments.of(LAYER1_PATH_ID, List.of(LAYER3_PATH_ID)),
+                Arguments.of(LAYER2_PATH_ID, List.of(LAYER1_PATH_ID)),
+                Arguments.of(LAYER3_PATH_ID, List.of(LAYER1_PATH_ID, LAYER2_PATH_ID))
+        );
+    }
+
+    @MethodSource("paramsTestLayersSelfmade")
+    @ParameterizedTest
+    public void testLayersSelfmadeDependOn(String packagePathToCheck, List<String> forbiddenPackagePaths) {
+        noClassShouldUse(
+                CheckType.DEPEND_ON_CLASSES_THAT,
+                packagePathToCheck,
+                forbiddenPackagePaths,
+                true);
+    }
+
+    @MethodSource("paramsTestLayersSelfmade")
+    @ParameterizedTest
+    public void testLayersSelfmadeAccess(String packagePathToCheck, List<String> forbiddenPackagePaths) {
+        // accessClassesThat() is a little weaker than dependOnClassesThat() according to documentation
+        noClassShouldUse(
+                CheckType.ACCESS_CLASSES_THAT,
+                packagePathToCheck,
+                forbiddenPackagePaths,
+                true);
+    }
+
+
+    public enum CheckType {
+        DEPEND_ON_CLASSES_THAT,
+        ACCESS_CLASSES_THAT
+    }
+
+
+    private void noClassShouldUse(final CheckType checkType, final String pathToCheck,
+                                  final Collection<String> forbiddenPaths,
+                                  final boolean assertTheExistenceOfClasses) {
+        noClassShouldUse(checkType, pathToCheck, forbiddenPaths.toArray(
+                new String[0]), assertTheExistenceOfClasses);
+    }
+
+    private void noClassShouldUse(final CheckType checkType, final String pathToCheck,
+                                  final String[] forbiddenPaths,
+                                  final boolean assertTheExistenceOfClasses) {
+        if (checkType == CheckType.DEPEND_ON_CLASSES_THAT) {
+            ArchRuleDefinition
+                    .noClasses().that().resideInAPackage(pathToCheck)
+                    .should().dependOnClassesThat().resideInAnyPackage(forbiddenPaths)
+                    .allowEmptyShould(!assertTheExistenceOfClasses)
+                    .check(OUR_CLASSES);
+        } else if (checkType == CheckType.ACCESS_CLASSES_THAT) {
+            ArchRuleDefinition
+                    .noClasses().that().resideInAPackage(pathToCheck)
+                    .should().accessClassesThat().resideInAnyPackage(forbiddenPaths)
+                    .allowEmptyShould(!assertTheExistenceOfClasses)
+                    .check(OUR_CLASSES);
+        }
+    }
+}
+----
 === Annotated Example
 [source, java]
 ----
-include::src/main/java/de/koelle/christian/archunit/layer1a/MyLayer1Clazz.java[]
+package de.koelle.christian.archunit.layer1a;
+
+import de.koelle.christian.archunit.layer2a.MyLayer2Clazz;
+import de.koelle.christian.archunit.layer2a.MyLayer2Ids;
+import de.koelle.christian.archunit.layer2a.MyLayer2StaticUtil;
+import de.koelle.christian.archunit.layer3a.MyLayer3Ids;
+import de.koelle.christian.archunit.layer3a.MyLayer3Object;
+
+public class MyLayer1Clazz {
+
+    // @Inject
+    // @Autowire
+    private MyLayer2Clazz service = new MyLayer2Clazz();
+
+
+    public void doSomething1(String x) {
+        String result = service.doSomething(x);
+    }
+
+    public void doSomething2(String x) {
+        // -------------------- Constant Access
+        // Next statement: Valid as expected
+        System.out.println(MyLayer2Ids.CONSTANT_LAYER_2);
+        // Next statement: Valid, not wanted, but for Strings and Primitives not testable
+        // by Archunit as 'not referenced as dependencies in the byte code, but just inlined
+        // in the constant pool of the class that uses
+        // it' see: https://github.com/TNG/ArchUnit/issues/1115
+        System.out.println(MyLayer3Ids.CONSTANT_LAYER_3);
+
+        // -------------------- Static Acces
+        // Next statement: Valid as expected
+        System.out.println(MyLayer2StaticUtil.myStaticMethod("whatever"));
+        // Next statement: Invalid as expected (for all variants: layer, dependOnClassesThat,
+        // accessClassesThat)
+//        System.out.println(MyLayer3StaticUtil.myStaticMethod("whatever"));
+
+        // -------------------- Normal Access
+        // Next statement: Valid: It is valid to obtain a 'forbidden' object on layer1 from
+        // layer3 via the public signature of 'layer2'
+        MyLayer3Object layer3Obj = service.doSomethingElse(x);
+        // Next statement: Valid: Dito and you can do something with it.
+        System.out.println(layer3Obj);
+
+        // Next statement: invalid as expected: You cannot access a 'forbidden' object.
+        // (for all variants: layer, dependOnClassesThat, accessClassesThat)
+//         System.out.println(layer3Obj.toString());
+
+        // Next statement: invalid as expected: You cannot create a 'forbidden' object.
+        // (for all variants: layer, dependOnClassesThat, accessClassesThat)
+//         new MyLayer3Object(x); // invalid
+    }
+}
 ----
